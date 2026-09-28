@@ -35,6 +35,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    Update,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -310,21 +311,46 @@ def back_to_main_kb() -> InlineKeyboardMarkup:
 # Ограничение доступа: только ADMIN_ID (через глобальные outer-миддлвари)
 # ----------------------------------------------------------------------------
 def register_guards(dp: Dispatcher) -> None:
-    async def message_guard(handler, event: Message, kwargs):
-        if event.from_user and event.from_user.id == ADMIN_ID:
-            return await handler(event, **kwargs)
-        logger.info("Ignored message from non-admin user id=%s",
-                    getattr(event.from_user, "id", "?"))
-        return None  # тихо игнорируем всех остальных
+    """Ограничение доступа: только ADMIN_ID.
 
-    async def callback_guard(handler, event: CallbackQuery, kwargs):
-        if event.from_user and event.from_user.id == ADMIN_ID:
-            return await handler(event, **kwargs)
-        await event.answer("⛔ Доступ запрещён.")
-        return None
+    Почему НЕ plain outer-middleware: aiogram оборачивает outer-миддлвари
+    и на уровне Dispatcher, и на уровне каждого Router (propagate_event),
+    а внутренний _wrapped в Router.propagate_event принимает строго
+    определённый набор ключей — слепой проброс **kwargs приводил к
+    TypeError: unexpected keyword argument 'dispatcher'.
 
-    dp.message.outer_middleware(message_guard)
-    dp.callback_query.outer_middleware(callback_guard)
+    Решение: guard вызывается ТОЛЬКО на верхнем уровне цепочки
+    (data["event_router"] is dp — Dispatcher является корневым роутером).
+    На нижних уровнях управление передаётся inner-обработчику БЕЗ изменения
+    kwargs. Для чужих пользователей на верхнем уровне апдейт отклоняется
+    без вызова inner-цепочки (тихий игнор).
+    """
+
+    def make_guard(event_type: str):
+        async def guard(handler, event, data: dict):
+            # Пропускаем только верхний (Dispatcher) уровень миддлварей;
+            # ниже по цепочке идем строго через оригинальный handler(event, data)
+            if data.get("event_router") is not dp:
+                return await handler(event, data)
+
+            user = data.get("event_from_user")
+            if user is not None and user.id == ADMIN_ID:
+                return await handler(event, data)
+
+            logger.info("Ignored %s from non-admin user id=%s",
+                        event_type, getattr(user, "id", "?"))
+            if event_type == "callback_query":
+                try:
+                    await event.answer("⛔ Доступ запрещён.")
+                except Exception:
+                    pass
+            # Не вызываем inner-цепочку => обновление не обработано (тихий игнор)
+            return None
+
+        return guard
+
+    dp.message.outer_middleware(make_guard("message"))
+    dp.callback_query.outer_middleware(make_guard("callback_query"))
 
 
 # ----------------------------------------------------------------------------
