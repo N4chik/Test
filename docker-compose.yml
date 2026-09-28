@@ -1,0 +1,13 @@
+services:
+  ai-reminder-bot:
+    build: .
+    container_name: ai-reminder-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # SQLite-база переживает пересборку/перезапуск контейнера
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+      - TZ=${TZ:-Europe/Moscow}
